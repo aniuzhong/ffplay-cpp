@@ -23,7 +23,6 @@ public:
 
     bool valid() const { return pkt_list_ != nullptr; }
     int serial() const { return serial_; }
-    int* serial_ptr() { return &serial_; } // TODO: remove when Clock refactored
     int nb_packets() const { return nb_packets_; }
     int size() const { return size_; }
     int64_t duration() const { return duration_; }
