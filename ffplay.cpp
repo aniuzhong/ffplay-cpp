@@ -23,13 +23,10 @@
  * simple media player based on the FFmpeg libraries
  */
 
-#include "config.h"
-#include "config_components.h"
-#include <math.h>
-#include <limits.h>
-#include <signal.h>
-#include <stdint.h>
-
+#include <cmath>
+#include <climits>
+#include <csignal>
+#include <cstdint>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -38,29 +35,30 @@
 #include <SDL.h>
 
 extern "C" {
-#include "libavutil/avstring.h"
-#include "libavutil/channel_layout.h"
-#include "libavutil/mathematics.h"
-#include "libavutil/mem.h"
-#include "libavutil/pixdesc.h"
-#include "libavutil/dict.h"
-#include "libavutil/fifo.h"
-#include "libavutil/parseutils.h"
-#include "libavutil/samplefmt.h"
-#include "libavutil/time.h"
-#include "libavutil/bprint.h"
-#include "libavformat/avformat.h"
-#include "libavdevice/avdevice.h"
-#include "libswscale/swscale.h"
-#include "libavutil/opt.h"
-#include "libavutil/tx.h"
-#include "libswresample/swresample.h"
-
-#include "libavfilter/avfilter.h"
-#include "libavfilter/buffersink.h"
-#include "libavfilter/buffersrc.h"
+#include <libavutil/avstring.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/dict.h>
+#include <libavutil/fifo.h>
+#include <libavutil/parseutils.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/time.h>
+#include <libavutil/bprint.h>
+#include <libavformat/avformat.h>
+#include <libavdevice/avdevice.h>
+#include <libswscale/swscale.h>
+#include <libavutil/opt.h>
+#include <libavutil/tx.h>
+#include <libswresample/swresample.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 }
 
+#include "config.h"
+#include "config_components.h"
 #include "packet_queue.h"
 #include "clock.h"
 #include "frame.h"
@@ -68,24 +66,12 @@ extern "C" {
 #include "audio_output.h"
 #include "audio_visualizer.h"
 #include "decoder.h"
+#include "video_output.h"
+#include "sdl_video_output.h"
 #include "utils/cmdutils.h"
 #include "utils/opt_common.h"
 
 typedef AudioVisualizer::ShowMode ShowMode;
-
-#define VIDEO_BACKGROUND_TILE_SIZE 64
-
-enum class VideoBackgroundType {
-    Tiles,
-    Color,
-    None,
-};
-
-struct RenderParams {
-    SDL_Rect target_rect;
-    uint8_t video_background_color[4];
-    VideoBackgroundType video_background_type;
-};
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -125,8 +111,6 @@ constexpr double REFRESH_RATE = 0.01;
 
 /* NOTE: the size must be big enough to compensate the hardware audio buffersize size */
 constexpr int64_t CURSOR_HIDE_DELAY = 1000000;
-
-#define USE_ONEPASS_SUBTITLE_RENDER 1
 
 constexpr int VIDEO_PICTURE_QUEUE_SIZE = 3;
 constexpr int SUBPICTURE_QUEUE_SIZE = 16;
@@ -179,10 +163,8 @@ struct VideoState {
 
     AudioVisualizer audio_vis;
     double last_vis_time;
-    RenderParams render_params;
-    SDL_Texture *vis_texture;
-    SDL_Texture *sub_texture;
-    SDL_Texture *vid_texture;
+
+    VideoOutput *video_out = nullptr;
 
     int subtitle_stream;
     AVStream *subtitle_st;
@@ -195,11 +177,9 @@ struct VideoState {
     AVStream *video_st;
     PacketQueue videoq;
     double max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
-    struct SwsContext *sub_convert_ctx;
     int eof;
 
     char *filename;
-    int width, height, xleft, ytop;
     int step;
 
     int vfilter_idx;
@@ -273,30 +253,6 @@ constexpr Uint32 FF_QUIT_EVENT = SDL_USEREVENT + 2;
 static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_RendererInfo renderer_info = {0};
-static const struct TextureFormatEntry {
-    enum AVPixelFormat format;
-    int texture_fmt;
-} sdl_texture_format_map[] = {
-    { AV_PIX_FMT_RGB8,           SDL_PIXELFORMAT_RGB332 },
-    { AV_PIX_FMT_RGB444,         SDL_PIXELFORMAT_RGB444 },
-    { AV_PIX_FMT_RGB555,         SDL_PIXELFORMAT_RGB555 },
-    { AV_PIX_FMT_BGR555,         SDL_PIXELFORMAT_BGR555 },
-    { AV_PIX_FMT_RGB565,         SDL_PIXELFORMAT_RGB565 },
-    { AV_PIX_FMT_BGR565,         SDL_PIXELFORMAT_BGR565 },
-    { AV_PIX_FMT_RGB24,          SDL_PIXELFORMAT_RGB24 },
-    { AV_PIX_FMT_BGR24,          SDL_PIXELFORMAT_BGR24 },
-    { AV_PIX_FMT_0RGB32,         SDL_PIXELFORMAT_RGB888 },
-    { AV_PIX_FMT_0BGR32,         SDL_PIXELFORMAT_BGR888 },
-    { AV_PIX_FMT_NE(RGB0, 0BGR), SDL_PIXELFORMAT_RGBX8888 },
-    { AV_PIX_FMT_NE(BGR0, 0RGB), SDL_PIXELFORMAT_BGRX8888 },
-    { AV_PIX_FMT_RGB32,          SDL_PIXELFORMAT_ARGB8888 },
-    { AV_PIX_FMT_RGB32_1,        SDL_PIXELFORMAT_RGBA8888 },
-    { AV_PIX_FMT_BGR32,          SDL_PIXELFORMAT_ABGR8888 },
-    { AV_PIX_FMT_BGR32_1,        SDL_PIXELFORMAT_BGRA8888 },
-    { AV_PIX_FMT_YUV420P,        SDL_PIXELFORMAT_IYUV },
-    { AV_PIX_FMT_YUYV422,        SDL_PIXELFORMAT_YUY2 },
-    { AV_PIX_FMT_UYVY422,        SDL_PIXELFORMAT_UYVY },
-};
 
 static int opt_add_vfilter(void *optctx, const char *opt, const char *arg)
 {
@@ -320,349 +276,6 @@ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
         return av_get_packed_sample_fmt(fmt1) != av_get_packed_sample_fmt(fmt2);
     else
         return channel_count1 != channel_count2 || fmt1 != fmt2;
-}
-
-static inline void fill_rectangle(int x, int y, int w, int h)
-{
-    SDL_Rect rect;
-    rect.x = x;
-    rect.y = y;
-    rect.w = w;
-    rect.h = h;
-    if (w && h)
-        SDL_RenderFillRect(renderer, &rect);
-}
-
-static int realloc_texture(SDL_Texture **texture, Uint32 new_format, int new_width, int new_height, SDL_BlendMode blendmode, int init_texture)
-{
-    Uint32 format;
-    int access, w, h;
-    if (!*texture || SDL_QueryTexture(*texture, &format, &access, &w, &h) < 0 || new_width != w || new_height != h || new_format != format) {
-        void *pixels;
-        int pitch;
-        if (*texture)
-            SDL_DestroyTexture(*texture);
-        if (!(*texture = SDL_CreateTexture(renderer, new_format, SDL_TEXTUREACCESS_STREAMING, new_width, new_height)))
-            return -1;
-        if (SDL_SetTextureBlendMode(*texture, blendmode) < 0)
-            return -1;
-        if (init_texture) {
-            if (SDL_LockTexture(*texture, nullptr, &pixels, &pitch) < 0)
-                return -1;
-            memset(pixels, 0, pitch * new_height);
-            SDL_UnlockTexture(*texture);
-        }
-        av_log(nullptr, AV_LOG_VERBOSE, "Created %dx%d texture with %s.\n", new_width, new_height, SDL_GetPixelFormatName(new_format));
-    }
-    return 0;
-}
-
-static void calculate_display_rect(SDL_Rect *rect,
-                                   int scr_xleft, int scr_ytop, int scr_width, int scr_height,
-                                   int pic_width, int pic_height, AVRational pic_sar)
-{
-    AVRational aspect_ratio = pic_sar;
-    int64_t width, height, x, y;
-
-    if (av_cmp_q(aspect_ratio, av_make_q(0, 1)) <= 0)
-        aspect_ratio = av_make_q(1, 1);
-
-    aspect_ratio = av_mul_q(aspect_ratio, av_make_q(pic_width, pic_height));
-
-    /* XXX: we suppose the screen has a 1.0 pixel ratio */
-    height = scr_height;
-    width = av_rescale(height, aspect_ratio.num, aspect_ratio.den) & ~1;
-    if (width > scr_width) {
-        width = scr_width;
-        height = av_rescale(width, aspect_ratio.den, aspect_ratio.num) & ~1;
-    }
-    x = (scr_width - width) / 2;
-    y = (scr_height - height) / 2;
-    rect->x = scr_xleft + x;
-    rect->y = scr_ytop  + y;
-    rect->w = FFMAX((int)width,  1);
-    rect->h = FFMAX((int)height, 1);
-}
-
-static void get_sdl_pix_fmt_and_blendmode(int format, Uint32 *sdl_pix_fmt, SDL_BlendMode *sdl_blendmode)
-{
-    int i;
-    *sdl_blendmode = SDL_BLENDMODE_NONE;
-    *sdl_pix_fmt = SDL_PIXELFORMAT_UNKNOWN;
-    if (format == AV_PIX_FMT_RGB32   ||
-        format == AV_PIX_FMT_RGB32_1 ||
-        format == AV_PIX_FMT_BGR32   ||
-        format == AV_PIX_FMT_BGR32_1)
-        *sdl_blendmode = SDL_BLENDMODE_BLEND;
-    for (i = 0; i < FF_ARRAY_ELEMS(sdl_texture_format_map); i++) {
-        if (format == sdl_texture_format_map[i].format) {
-            *sdl_pix_fmt = sdl_texture_format_map[i].texture_fmt;
-            return;
-        }
-    }
-}
-
-static int upload_texture(SDL_Texture **tex, AVFrame *frame)
-{
-    int ret = 0;
-    Uint32 sdl_pix_fmt;
-    SDL_BlendMode sdl_blendmode;
-    get_sdl_pix_fmt_and_blendmode(frame->format, &sdl_pix_fmt, &sdl_blendmode);
-    if (realloc_texture(tex, sdl_pix_fmt == SDL_PIXELFORMAT_UNKNOWN ? SDL_PIXELFORMAT_ARGB8888 : sdl_pix_fmt, frame->width, frame->height, sdl_blendmode, 0) < 0)
-        return -1;
-    switch (sdl_pix_fmt) {
-        case SDL_PIXELFORMAT_IYUV:
-            if (frame->linesize[0] > 0 && frame->linesize[1] > 0 && frame->linesize[2] > 0) {
-                ret = SDL_UpdateYUVTexture(*tex, nullptr, frame->data[0], frame->linesize[0],
-                                                       frame->data[1], frame->linesize[1],
-                                                       frame->data[2], frame->linesize[2]);
-            } else if (frame->linesize[0] < 0 && frame->linesize[1] < 0 && frame->linesize[2] < 0) {
-                ret = SDL_UpdateYUVTexture(*tex, nullptr, frame->data[0] + frame->linesize[0] * (frame->height                    - 1), -frame->linesize[0],
-                                                       frame->data[1] + frame->linesize[1] * (AV_CEIL_RSHIFT(frame->height, 1) - 1), -frame->linesize[1],
-                                                       frame->data[2] + frame->linesize[2] * (AV_CEIL_RSHIFT(frame->height, 1) - 1), -frame->linesize[2]);
-            } else {
-                av_log(nullptr, AV_LOG_ERROR, "Mixed negative and positive linesizes are not supported.\n");
-                return -1;
-            }
-            break;
-        default:
-            if (frame->linesize[0] < 0) {
-                ret = SDL_UpdateTexture(*tex, nullptr, frame->data[0] + frame->linesize[0] * (frame->height - 1), -frame->linesize[0]);
-            } else {
-                ret = SDL_UpdateTexture(*tex, nullptr, frame->data[0], frame->linesize[0]);
-            }
-            break;
-    }
-    return ret;
-}
-
-static enum AVColorSpace sdl_supported_color_spaces[] = {
-    AVCOL_SPC_BT709,
-    AVCOL_SPC_BT470BG,
-    AVCOL_SPC_SMPTE170M,
-};
-
-static enum AVAlphaMode sdl_supported_alpha_modes[] = {
-    AVALPHA_MODE_UNSPECIFIED,
-    AVALPHA_MODE_STRAIGHT,
-};
-
-static void set_sdl_yuv_conversion_mode(AVFrame *frame)
-{
-#if SDL_VERSION_ATLEAST(2,0,8)
-    SDL_YUV_CONVERSION_MODE mode = SDL_YUV_CONVERSION_AUTOMATIC;
-    if (frame && (frame->format == AV_PIX_FMT_YUV420P || frame->format == AV_PIX_FMT_YUYV422 || frame->format == AV_PIX_FMT_UYVY422)) {
-        if (frame->color_range == AVCOL_RANGE_JPEG)
-            mode = SDL_YUV_CONVERSION_JPEG;
-        else if (frame->colorspace == AVCOL_SPC_BT709)
-            mode = SDL_YUV_CONVERSION_BT709;
-        else if (frame->colorspace == AVCOL_SPC_BT470BG || frame->colorspace == AVCOL_SPC_SMPTE170M)
-            mode = SDL_YUV_CONVERSION_BT601;
-    }
-    SDL_SetYUVConversionMode(mode); /* FIXME: no support for linear transfer */
-#endif
-}
-
-static void draw_video_background(VideoState *is)
-{
-    const int tile_size = VIDEO_BACKGROUND_TILE_SIZE;
-    SDL_Rect *rect = &is->render_params.target_rect;
-    SDL_BlendMode blendMode;
-
-    if (!SDL_GetTextureBlendMode(is->vid_texture, &blendMode) && blendMode == SDL_BLENDMODE_BLEND) {
-        switch (is->render_params.video_background_type) {
-        case VideoBackgroundType::Tiles:
-            SDL_SetRenderDrawColor(renderer, 237, 237, 237, 255);
-            fill_rectangle(rect->x, rect->y, rect->w, rect->h);
-            SDL_SetRenderDrawColor(renderer, 222, 222, 222, 255);
-            for (int x = 0; x < rect->w; x += tile_size * 2)
-                fill_rectangle(rect->x + x, rect->y, FFMIN(tile_size, rect->w - x), rect->h);
-            for (int y = 0; y < rect->h; y += tile_size * 2)
-                fill_rectangle(rect->x, rect->y + y, rect->w, FFMIN(tile_size, rect->h - y));
-            SDL_SetRenderDrawColor(renderer, 237, 237, 237, 255);
-            for (int y = 0; y < rect->h; y += tile_size * 2) {
-                int h = FFMIN(tile_size, rect->h - y);
-                for (int x = 0; x < rect->w; x += tile_size * 2)
-                    fill_rectangle(x + rect->x, y + rect->y, FFMIN(tile_size, rect->w - x), h);
-            }
-            break;
-        case VideoBackgroundType::Color: {
-            const uint8_t *c = is->render_params.video_background_color;
-            SDL_SetRenderDrawColor(renderer, c[0], c[1], c[2], c[3]);
-            fill_rectangle(rect->x, rect->y, rect->w, rect->h);
-            break;
-        }
-        case VideoBackgroundType::None:
-            SDL_SetTextureBlendMode(is->vid_texture, SDL_BLENDMODE_NONE);
-            break;
-        }
-    }
-}
-
-static void video_image_display(VideoState *is)
-{
-    Frame *vp;
-    Frame *sp = nullptr;
-    SDL_Rect *rect = &is->render_params.target_rect;
-
-    vp = is->pictq.peek_last();
-    calculate_display_rect(rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
-
-    if (is->subtitle_st) {
-        if (is->subpq.nb_remaining() > 0) {
-            sp = is->subpq.peek();
-
-            if (vp->pts >= sp->pts + ((float) sp->sub.start_display_time / 1000)) {
-                if (!sp->uploaded) {
-                    uint8_t* pixels[4];
-                    int pitch[4];
-                    int i;
-                    if (!sp->width || !sp->height) {
-                        sp->width = vp->width;
-                        sp->height = vp->height;
-                    }
-                    if (realloc_texture(&is->sub_texture, SDL_PIXELFORMAT_ARGB8888, sp->width, sp->height, SDL_BLENDMODE_BLEND, 1) < 0)
-                        return;
-
-                    for (i = 0; i < sp->sub.num_rects; i++) {
-                        AVSubtitleRect *sub_rect = sp->sub.rects[i];
-
-                        sub_rect->x = av_clip(sub_rect->x, 0, sp->width );
-                        sub_rect->y = av_clip(sub_rect->y, 0, sp->height);
-                        sub_rect->w = av_clip(sub_rect->w, 0, sp->width  - sub_rect->x);
-                        sub_rect->h = av_clip(sub_rect->h, 0, sp->height - sub_rect->y);
-
-                        is->sub_convert_ctx = sws_getCachedContext(is->sub_convert_ctx,
-                            sub_rect->w, sub_rect->h, AV_PIX_FMT_PAL8,
-                            sub_rect->w, sub_rect->h, AV_PIX_FMT_BGRA,
-                            0, nullptr, nullptr, nullptr);
-                        if (!is->sub_convert_ctx) {
-                            av_log(nullptr, AV_LOG_FATAL, "Cannot initialize the conversion context\n");
-                            return;
-                        }
-                        if (!SDL_LockTexture(is->sub_texture, (SDL_Rect *)sub_rect, (void **)pixels, pitch)) {
-                            sws_scale(is->sub_convert_ctx, (const uint8_t * const *)sub_rect->data, sub_rect->linesize,
-                                      0, sub_rect->h, pixels, pitch);
-                            SDL_UnlockTexture(is->sub_texture);
-                        }
-                    }
-                    sp->uploaded = 1;
-                }
-            } else
-                sp = nullptr;
-        }
-    }
-
-    set_sdl_yuv_conversion_mode(vp->frame);
-
-    if (!vp->uploaded) {
-        if (upload_texture(&is->vid_texture, vp->frame) < 0) {
-            set_sdl_yuv_conversion_mode(nullptr);
-            return;
-        }
-        vp->uploaded = 1;
-        vp->flip_v = vp->frame->linesize[0] < 0;
-    }
-
-    draw_video_background(is);
-    SDL_RenderCopyEx(renderer, is->vid_texture, nullptr, rect, 0, nullptr, vp->flip_v ? SDL_FLIP_VERTICAL : SDL_FLIP_NONE);
-    set_sdl_yuv_conversion_mode(nullptr);
-    if (sp) {
-#if USE_ONEPASS_SUBTITLE_RENDER
-        SDL_RenderCopy(renderer, is->sub_texture, nullptr, rect);
-#else
-        int i;
-        double xratio = (double)rect->w / (double)sp->width;
-        double yratio = (double)rect->h / (double)sp->height;
-        for (i = 0; i < sp->sub.num_rects; i++) {
-            SDL_Rect *sub_rect = (SDL_Rect*)sp->sub.rects[i];
-            SDL_Rect target = {.x = rect.x + sub_rect->x * xratio,
-                               .y = rect.y + sub_rect->y * yratio,
-                               .w = sub_rect->w * xratio,
-                               .h = sub_rect->h * yratio};
-            SDL_RenderCopy(renderer, is->sub_texture, sub_rect, &target);
-        }
-#endif
-    }
-}
-
-static void video_audio_display(VideoState *s)
-{
-    int channels = s->audio_out->hw_params().ch_layout.nb_channels;
-
-    /* Snapshot ring under mutex; feed() runs on SDL audio thread. */
-    s->audio_vis.sync_display_ring();
-
-    if (s->audio_vis.mode() == ShowMode::Waves) {
-        int i_start = s->audio_vis.prepare_waveform(
-            channels, s->audio_out->write_buf_size(), audio_callback_time,
-            s->audio_out->hw_params().freq, s->paused, s->width);
-
-        int nb_display_channels = channels;
-        int h = s->height / nb_display_channels;
-        int h2 = (h * 9) / 20;
-
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        for (int ch = 0; ch < nb_display_channels; ch++) {
-            int i = AudioVisualizer::compute_mod(i_start + ch, AudioVisualizer::SAMPLE_ARRAY_SIZE);
-            int y1 = s->ytop + ch * h + (h / 2);
-            for (int x = 0; x < s->width; x++) {
-                int y = (s->audio_vis.sample_at(i) * h2) >> 15;
-                int ys;
-                if (y < 0) {
-                    y = -y;
-                    ys = y1 - y;
-                } else {
-                    ys = y1;
-                }
-                fill_rectangle(s->xleft + x, ys, 1, y);
-                i += channels;
-                if (i >= AudioVisualizer::SAMPLE_ARRAY_SIZE)
-                    i -= AudioVisualizer::SAMPLE_ARRAY_SIZE;
-            }
-        }
-
-        SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255);
-        for (int ch = 1; ch < nb_display_channels; ch++) {
-            int y = s->ytop + ch * h;
-            fill_rectangle(s->xleft, y, s->width, 1);
-        }
-    } else {
-        if (s->audio_vis.prepare_spectrum_column(
-                channels, s->audio_out->write_buf_size(), audio_callback_time,
-                s->audio_out->hw_params().freq, s->paused, s->width, s->height) < 0) {
-            s->audio_vis.set_mode(ShowMode::Waves);
-            return;
-        }
-
-        if (realloc_texture(&s->vis_texture, SDL_PIXELFORMAT_ARGB8888,
-                            s->width, s->height, SDL_BLENDMODE_NONE, 1) < 0)
-            return;
-
-        int nb_display_channels = FFMIN(s->audio_vis.nb_display_channels(), 2);
-        int nb_freq = s->audio_vis.nb_freq();
-        SDL_Rect rect = {.x = s->audio_vis.xpos(), .y = 0, .w = 1, .h = s->height};
-        uint32_t *pixels;
-        int pitch;
-        if (!SDL_LockTexture(s->vis_texture, &rect, (void **)&pixels, &pitch)) {
-            pitch >>= 2;
-            pixels += pitch * s->height;
-            for (int y = 0; y < s->height; y++) {
-                double w = 1 / sqrt(nb_freq);
-                const AVComplexFloat *d0 = s->audio_vis.spectrum_data(0);
-                const AVComplexFloat *d1 = s->audio_vis.spectrum_data(1);
-                int a = sqrt(w * sqrt(d0[y].re * d0[y].re + d0[y].im * d0[y].im));
-                int b = (nb_display_channels == 2)
-                    ? sqrt(w * hypot(d1[y].re, d1[y].im)) : a;
-                a = FFMIN(a, 255);
-                b = FFMIN(b, 255);
-                pixels -= pitch;
-                *pixels = (a << 16) + (b << 8) + ((a + b) >> 1);
-            }
-            SDL_UnlockTexture(s->vis_texture);
-        }
-        SDL_RenderCopy(renderer, s->vis_texture, nullptr, nullptr);
-    }
 }
 
 static void stream_component_close(VideoState *is, int stream_index)
@@ -731,16 +344,9 @@ static void stream_close(VideoState *is)
     avformat_close_input(&is->ic);
 
     /* free all pictures */
-    /* free all pictures */
-    sws_freeContext(is->sub_convert_ctx);
     av_free(is->filename);
-    if (is->vis_texture)
-        SDL_DestroyTexture(is->vis_texture);
-    if (is->vid_texture)
-        SDL_DestroyTexture(is->vid_texture);
-    if (is->sub_texture)
-        SDL_DestroyTexture(is->sub_texture);
     delete is->audio_out;
+    delete is->video_out;
     delete is;
 }
 
@@ -776,52 +382,14 @@ static void sigterm_handler(int sig)
 
 static void set_default_window_size(int width, int height, AVRational sar)
 {
-    SDL_Rect rect;
+    Rect rect;
     int max_width  = screen_width  ? screen_width  : INT_MAX;
     int max_height = screen_height ? screen_height : INT_MAX;
     if (max_width == INT_MAX && max_height == INT_MAX)
         max_height = height;
-    calculate_display_rect(&rect, 0, 0, max_width, max_height, width, height, sar);
+    VideoOutput::calc_display_rect(&rect, 0, 0, max_width, max_height, width, height, sar);
     default_width  = rect.w;
     default_height = rect.h;
-}
-
-static int video_open(VideoState *is)
-{
-    int w,h;
-
-    w = screen_width ? screen_width : default_width;
-    h = screen_height ? screen_height : default_height;
-
-    if (!window_title)
-        window_title = input_filename;
-    SDL_SetWindowTitle(window, window_title);
-
-    SDL_SetWindowSize(window, w, h);
-    SDL_SetWindowPosition(window, screen_left, screen_top);
-    if (is_full_screen)
-        SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
-    SDL_ShowWindow(window);
-
-    is->width  = w;
-    is->height = h;
-
-    return 0;
-}
-
-/* display the current picture, if any */
-static void video_display(VideoState *is)
-{
-    if (!is->width)
-        video_open(is);
-
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
-    if (is->audio_st && is->audio_vis.is_visible())
-        video_audio_display(is);
-    else if (is->video_st)
-        video_image_display(is);
-    SDL_RenderPresent(renderer);
 }
 
 static AVSyncType get_master_sync_type(VideoState *is) {
@@ -995,7 +563,8 @@ static void video_refresh(void *opaque, double *remaining_time)
     if (!display_disable && is->audio_vis.is_visible() && is->audio_st) {
         time = av_gettime_relative() / 1000000.0;
         if (is->force_refresh || is->last_vis_time + rdftspeed < time) {
-            video_display(is);
+            is->video_out->display_audio_vis(&is->audio_vis, is->audio_out,
+                                              audio_callback_time, is->paused);
             is->last_vis_time = time;
         }
         *remaining_time = FFMIN(*remaining_time, is->last_vis_time + rdftspeed - time);
@@ -1067,20 +636,7 @@ retry:
                             || (is->vidclk.pts() > (sp->pts + ((float) sp->sub.end_display_time / 1000)))
                             || (sp2 && is->vidclk.pts() > (sp2->pts + ((float) sp2->sub.start_display_time / 1000))))
                     {
-                        if (sp->uploaded) {
-                            int i;
-                            for (i = 0; i < sp->sub.num_rects; i++) {
-                                AVSubtitleRect *sub_rect = sp->sub.rects[i];
-                                uint8_t *pixels;
-                                int pitch, j;
-
-                                if (!SDL_LockTexture(is->sub_texture, (SDL_Rect *)sub_rect, (void **)&pixels, &pitch)) {
-                                    for (j = 0; j < sub_rect->h; j++, pixels += pitch)
-                                        memset(pixels, 0, sub_rect->w << 2);
-                                    SDL_UnlockTexture(is->sub_texture);
-                                }
-                            }
-                        }
+                        is->video_out->clear_subtitle_areas(sp);
                         is->subpq.next();
                     } else {
                         break;
@@ -1096,8 +652,21 @@ retry:
         }
 display:
         /* display picture */
-        if (!display_disable && is->force_refresh && is->audio_vis.mode() == ShowMode::Video && is->pictq.rindex_shown())
-            video_display(is);
+        if (!display_disable && is->force_refresh && is->audio_vis.mode() == ShowMode::Video && is->pictq.rindex_shown()) {
+            if (!is->video_out->width()) {
+                int w = screen_width ? screen_width : default_width;
+                int h = screen_height ? screen_height : default_height;
+                if (!window_title)
+                    window_title = input_filename;
+                is->video_out->open(w, h, screen_left, screen_top,
+                                    window_title, is_full_screen);
+                is->video_out->set_layout(Rect{0, 0, w, h});
+            }
+            Frame *vp = is->pictq.peek_last();
+            Frame *sp = is->subtitle_st && is->subpq.nb_remaining() > 0
+                            ? is->subpq.peek() : nullptr;
+            is->video_out->display(vp, sp);
+        }
     }
     is->force_refresh = 0;
     if (show_status) {
@@ -1259,27 +828,29 @@ fail:
 
 static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
 {
-    enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
+    enum AVPixelFormat pix_fmts[32];
     char sws_flags_str[512] = "";
     int ret;
     AVFilterContext *filt_src = nullptr, *filt_out = nullptr, *last_filter = nullptr;
     AVCodecParameters *codecpar = is->video_st->codecpar;
     AVRational fr = av_guess_frame_rate(is->ic, is->video_st, nullptr);
     const AVDictionaryEntry *e = nullptr;
-    int nb_pix_fmts = 0;
-    int i, j;
+    int nb_pix_fmts;
+    int i;
     AVBufferSrcParameters *par = av_buffersrc_parameters_alloc();
 
     if (!par)
         return AVERROR(ENOMEM);
 
-    for (i = 0; i < renderer_info.num_texture_formats; i++) {
-        for (j = 0; j < FF_ARRAY_ELEMS(sdl_texture_format_map); j++) {
-            if (renderer_info.texture_formats[i] == sdl_texture_format_map[j].texture_fmt) {
-                pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
-                break;
-            }
-        }
+    if (!is->video_out) {
+        ret = AVERROR(EINVAL);
+        goto fail;
+    }
+    nb_pix_fmts = is->video_out->fill_buffersink_pixel_formats(
+        pix_fmts, (int)FF_ARRAY_ELEMS(pix_fmts));
+    if (nb_pix_fmts < 0) {
+        ret = nb_pix_fmts;
+        goto fail;
     }
 
     while ((e = av_dict_iterate(sws_dict, e))) {
@@ -1329,15 +900,21 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     if ((ret = av_opt_set_array(filt_out, "pixel_formats", AV_OPT_SEARCH_CHILDREN,
                                 0, nb_pix_fmts, AV_OPT_TYPE_PIXEL_FMT, pix_fmts)) < 0)
         goto fail;
-    if ((ret = av_opt_set_array(filt_out, "colorspaces", AV_OPT_SEARCH_CHILDREN,
-                                0, FF_ARRAY_ELEMS(sdl_supported_color_spaces),
-                                AV_OPT_TYPE_INT, sdl_supported_color_spaces)) < 0)
-        goto fail;
+    {
+        const auto &cs = is->video_out->supported_color_spaces();
+        if ((ret = av_opt_set_array(filt_out, "colorspaces", AV_OPT_SEARCH_CHILDREN,
+                                    0, (int)cs.size(),
+                                    AV_OPT_TYPE_INT, cs.data())) < 0)
+            goto fail;
+    }
 
-    if ((ret = av_opt_set_array(filt_out, "alphamodes", AV_OPT_SEARCH_CHILDREN,
-                                0, FF_ARRAY_ELEMS(sdl_supported_alpha_modes),
-                                AV_OPT_TYPE_INT, sdl_supported_alpha_modes)) < 0)
-        goto fail;
+    {
+        const auto &am = is->video_out->supported_alpha_modes();
+        if ((ret = av_opt_set_array(filt_out, "alphamodes", AV_OPT_SEARCH_CHILDREN,
+                                    0, (int)am.size(),
+                                    AV_OPT_TYPE_INT, am.data())) < 0)
+            goto fail;
+    }
 
     ret = avfilter_init_dict(filt_out, nullptr);
     if (ret < 0)
@@ -2305,8 +1882,6 @@ static VideoState *stream_open(const char *filename,
     if (!is->filename)
         goto fail;
     is->iformat = iformat;
-    is->ytop    = 0;
-    is->xleft   = 0;
 
     /* start video display */
     if (is->pictq.init(VIDEO_PICTURE_QUEUE_SIZE, 1) < 0)
@@ -2319,17 +1894,18 @@ static VideoState *stream_open(const char *filename,
     if (!is->videoq.valid() || !is->audioq.valid() || !is->subtitleq.valid())
         goto fail;
 
-    is->audio_out = new AudioOutput();
+    is->audio_out  = new AudioOutput();
+    is->video_out  = new SDLVideoOutput(renderer, window);
     if (startup_volume < 0)
         av_log(nullptr, AV_LOG_WARNING, "-volume=%d < 0, setting to 0\n", startup_volume);
     if (startup_volume > 100)
         av_log(nullptr, AV_LOG_WARNING, "-volume=%d > 100, setting to 100\n", startup_volume);
     if (video_background) {
         if (!strcmp(video_background, "none")) {
-            is->render_params.video_background_type = VideoBackgroundType::None;
+            is->video_out->render_params().video_background_type = VideoBackgroundType::None;
         } else if (strcmp(video_background, "tiles")) {
-            if (av_parse_color(is->render_params.video_background_color, video_background, -1, nullptr) >= 0)
-                is->render_params.video_background_type = VideoBackgroundType::Color;
+            if (av_parse_color(is->video_out->render_params().video_background_color, video_background, -1, nullptr) >= 0)
+                is->video_out->render_params().video_background_type = VideoBackgroundType::Color;
             else
                 goto fail;
         }
@@ -2503,7 +2079,7 @@ static void event_loop(VideoState *cur_stream)
                 break;
             }
             // If we don't yet have a window, skip all key events, because read_thread might still be initializing...
-            if (!cur_stream->width)
+            if (!cur_stream->video_out || !cur_stream->video_out->width())
                 continue;
             switch (event.key.keysym.sym) {
             case SDLK_f:
@@ -2637,7 +2213,7 @@ static void event_loop(VideoState *cur_stream)
             }
                 if (seek_by_bytes || cur_stream->ic->duration <= 0) {
                     uint64_t size =  avio_size(cur_stream->ic->pb);
-                    stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
+                    stream_seek(cur_stream, size*x/cur_stream->video_out->width(), 0, 1);
                 } else {
                     int64_t ts;
                     int ns, hh, mm, ss;
@@ -2646,7 +2222,7 @@ static void event_loop(VideoState *cur_stream)
                     thh  = tns / 3600;
                     tmm  = (tns % 3600) / 60;
                     tss  = (tns % 60);
-                    frac = x / cur_stream->width;
+                    frac = x / cur_stream->video_out->width();
                     ns   = frac * tns;
                     hh   = ns / 3600;
                     mm   = (ns % 3600) / 60;
@@ -2663,14 +2239,18 @@ static void event_loop(VideoState *cur_stream)
         case SDL_WINDOWEVENT:
             switch (event.window.event) {
                 case SDL_WINDOWEVENT_SIZE_CHANGED:
-                    screen_width  = cur_stream->width  = event.window.data1;
-                    screen_height = cur_stream->height = event.window.data2;
-                    if (cur_stream->vis_texture) {
-                        SDL_DestroyTexture(cur_stream->vis_texture);
-                        cur_stream->vis_texture = nullptr;
-                    }
+                    screen_width  = event.window.data1;
+                    screen_height = event.window.data2;
+                    if (cur_stream->video_out)
+                        cur_stream->video_out->set_layout(
+                            Rect{0, 0, event.window.data1, event.window.data2});
+                    cur_stream->force_refresh = 1;
+                    break;
                 case SDL_WINDOWEVENT_EXPOSED:
                     cur_stream->force_refresh = 1;
+                    break;
+                default:
+                    break;
             }
             break;
         case SDL_QUIT:

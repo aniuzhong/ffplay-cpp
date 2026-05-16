@@ -78,7 +78,12 @@ add_executable(ffplay-cpp
     frame_queue.h
     frame_queue.cpp
     decoder.h
-    decoder.cpp)
+    decoder.cpp
+    video_types.h
+    video_output.h
+    video_output.cpp
+    sdl_video_output.h
+    sdl_video_output.cpp)
 
 target_include_directories(ffplay-cpp PRIVATE
     "${FFPLAY_GEN_DIR}"
