@@ -16,6 +16,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
+#include <libavutil/avstring.h>
 #include <libavformat/avformat.h>
 #include <libavfilter/avfilter.h>
 }
@@ -198,6 +199,17 @@ int Player::prepare()
         return -1;
     }
 
+    /* read_thread: default window title from container metadata (ffplay.c ~2974). */
+    if (!window_title) {
+        const AVDictionaryEntry *t =
+            av_dict_get(dmx_->ic()->metadata, "title", nullptr, 0);
+        if (t) {
+            char *w = av_asprintf("%s - %s", t->value, input_filename);
+            if (w)
+                window_title = w;
+        }
+    }
+
     seek_by_bytes = dmx_->seek_by_bytes();
 
     // -- Open streams --
@@ -210,7 +222,7 @@ int Player::prepare()
         }
     }
 
-    int video_open_ret = 0;
+    int video_open_ret = -1;
     if (dmx_->video_index() >= 0)
         video_open_ret = openStream(dmx_->video_index());
 
@@ -238,12 +250,10 @@ int Player::prepare()
         return -1;
     }
 
-    // Match legacy stream_open: default global show_mode is None; user did not
-    // pass -showmode, so pick Video when we have a video stream else RDFT.
+    // Match ffplay read_thread: ret from stream_component_open(video) drives default.
     if (audio_vis_.mode() == AudioVisualizer::ShowMode::None) {
-        audio_vis_.set_mode(video_.stream != nullptr
-                                ? AudioVisualizer::ShowMode::Video
-                                : AudioVisualizer::ShowMode::Rdft);
+        audio_vis_.set_mode(video_open_ret >= 0 ? AudioVisualizer::ShowMode::Video
+                                                  : AudioVisualizer::ShowMode::Rdft);
     }
     show_mode = audio_vis_.mode();
 
@@ -637,16 +647,16 @@ double Player::duration() const
 //  seekTo / stepToNextFrame
 // ==========================================================================
 
-void Player::seekTo(double sec)
+void Player::seekTo(double sec, double rel_sec)
 {
     if (!dmx_) return;
-    stream_seek(sec);
+    stream_seek(sec, rel_sec);
 }
 
-void Player::stream_seek(double pos)
+void Player::stream_seek(double pos_sec, double incr_sec)
 {
-    dmx_->seek(static_cast<int64_t>(pos * AV_TIME_BASE),
-               static_cast<int64_t>(0), 0);
+    dmx_->seek(static_cast<int64_t>(pos_sec * AV_TIME_BASE),
+               static_cast<int64_t>(incr_sec * AV_TIME_BASE), 0);
 }
 
 void Player::stepToNextFrame()
@@ -769,8 +779,8 @@ void Player::toggleAudioDisplay()
 {
     AudioVisualizer::ShowMode next = AudioVisualizer::cycle_mode(
         audio_vis_.mode(),
-        video_.stream != nullptr,
-        audio_.stream != nullptr);
+        hasVideoStreamOpen(),
+        hasAudioStreamOpen());
     if (audio_vis_.mode() != next) {
         force_refresh_ = 1;
         audio_vis_.set_mode(next);
@@ -896,10 +906,21 @@ double Player::videoRefresh(double *remaining_time)
     if (!display_disable && audio_vis_.is_visible() && audio_.stream) {
         time = av_gettime_relative() / 1000000.0;
         if (force_refresh_ || last_vis_time_ + rdftspeed < time) {
-            if (video_dev_)
+            if (video_dev_) {
+                /* ffplay.c video_display: if (!is->width) video_open(is); — audio-only
+                 * (-vn) never hits the video branch that opens the window / layout. */
+                if (!video_dev_->width()) {
+                    const int w = screen_width ? screen_width : default_width;
+                    const int h = screen_height ? screen_height : default_height;
+                    const char *title = window_title ? window_title : input_filename;
+                    if (video_dev_->open(w, h, screen_left, screen_top,
+                                         title ? title : "ffplay", 0) >= 0)
+                        video_dev_->set_layout(Rect{0, 0, w, h});
+                }
                 video_dev_->display_audio_vis(&audio_vis_, audio_dev_,
                                                audio_callback_time,
                                                dmx_->is_paused());
+            }
             last_vis_time_ = time;
         }
         *remaining_time = FFMIN(*remaining_time, last_vis_time_ + rdftspeed - time);
@@ -1088,8 +1109,13 @@ void Player::sdlAudioCallback(void *opaque, Uint8 *stream, int len)
             return p->audclk_.get(p->audioq_.serial()) - p->masterClock();
         };
 
+        std::function<void(const int16_t *, int)> on_decode =
+            [p](const int16_t *samples, int count) {
+                p->audio_vis_.feed(samples, count);
+            };
+
         aout->read(stream, len, p->dmx_->is_paused(),
-                   next_frame, sync_diff, nullptr);
+                   next_frame, sync_diff, &on_decode);
 
         if (!isnan(aout->clock())) {
             p->audclk_.set_at(aout->clock_for_set_at(),

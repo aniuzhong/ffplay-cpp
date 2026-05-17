@@ -581,9 +581,14 @@ static void event_loop_player(Player *p)
                     p->dmx()->seek(bpos, (int64_t)incr, AVSEEK_FLAG_BYTE);
                 } else {
                     double pos_p = p->currentPosition();
-                    if (isnan(pos_p)) pos_p = 0.0;
+                    if (isnan(pos_p))
+                        pos_p = (double)p->dmx()->seek_target_units() / AV_TIME_BASE;
                     pos_p += incr;
-                    p->seekTo(pos_p);
+                    AVFormatContext *ic = p->dmx()->ic();
+                    if (ic->start_time != AV_NOPTS_VALUE &&
+                        pos_p < ic->start_time / (double)AV_TIME_BASE)
+                        pos_p = ic->start_time / (double)AV_TIME_BASE;
+                    p->seekTo(pos_p, incr);
                 }
                 break;
             default: break;

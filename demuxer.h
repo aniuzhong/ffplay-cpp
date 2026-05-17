@@ -119,6 +119,8 @@ public:
     double max_frame_duration()      const { return max_frame_duration_; }
     // Resolved after init() (auto -1 → 0/1 like classic read_thread).
     int  seek_by_bytes()             const { return options_.seek_by_bytes; }
+    /** Last posted seek target (AV_TIME_BASE); same role as ffplay VideoState::seek_pos. */
+    int64_t seek_target_units()      const { return seek_pos_; }
     // May change at read_loop start when -1 and realtime (same as ffplay).
     int  infinite_buffer()           const { return options_.infinite_buffer; }
 

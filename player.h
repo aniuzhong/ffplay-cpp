@@ -48,7 +48,7 @@ class VideoOutput;
  *
  * Seek protocol
  * -------------
- * 1. Player::seekTo → Demuxer::seek
+ * 1. Player::seekTo(sec, rel_sec) → Demuxer::seek(pos, rel, flags)
  * 2. Demuxer callback → Player lambda → flush audioq/videoq/subtitleq
  * 3. Decoder threads detect PacketQueue flush → avcodec_flush_buffers
  *    (triggered automatically by serial change in Decoder::decode_frame)
@@ -88,7 +88,8 @@ public:
     bool   isPaused() const { return paused_; }
 
     // -- Control --
-    void seekTo(double sec);
+    /** @param rel_sec relative jump in seconds (ffplay incr); forwarded as seek_rel in AV_TIME_BASE. */
+    void seekTo(double sec, double rel_sec = 0.0);
     void stepToNextFrame();
     void cycleChannel(int codecType);
     void toggleMute();
@@ -113,8 +114,8 @@ public:
     VideoOutput  *videoDevice() const { return video_dev_; }
     AudioDevice  *audioDevice() const { return audio_dev_; }
     int           videoFilterIndex() const { return vfilter_idx_; }
-    bool          hasVideoStreamOpen() const { return video_.stream_index >= 0; }
-    bool          hasAudioStreamOpen() const { return audio_.stream_index >= 0; }
+    bool          hasVideoStreamOpen() const { return video_.stream_index >= 0 && video_.decoder.has_codec(); }
+    bool          hasAudioStreamOpen() const { return audio_.stream_index >= 0 && audio_.decoder.has_codec(); }
     int          &frameDropsEarly()    { return frame_drops_early_; }
     int          &frameDropsLate()     { return frame_drops_late_; }
     double       &frameLastFilterDelay() { return frame_last_filter_delay_; }
@@ -203,5 +204,5 @@ private:
     void closeStream(int stream_index);
     void rollbackPrepare();
     void wireDemuxerCallbacks();
-    void stream_seek(double pos);
+    void stream_seek(double pos_sec, double incr_sec = 0.0);
 };

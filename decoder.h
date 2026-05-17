@@ -44,6 +44,9 @@ public:
     void set_finished(int serial)   { finished_ = serial; }
     void set_start_pts(int64_t pts, AVRational tb);
 
+    /** True after successful Decoder::init (owns avcodec context). */
+    bool has_codec() const { return avctx_ != nullptr; }
+
 private:
     AVCodecContext *avctx_ = nullptr;   // owning
     AVPacket       *pkt_   = nullptr;   // owning
