@@ -33,7 +33,7 @@ extern "C" {
 #include "video_output.h"
 
 
-#include "utils/cmdutils.h"
+#include "cmdutils.h"
 
 // ==========================================================================
 //  v1: read ffplay.cpp globals directly.  v2: PlayerConfig struct.

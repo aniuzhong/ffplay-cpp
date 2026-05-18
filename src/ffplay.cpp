@@ -69,8 +69,8 @@ extern "C" {
 #include "sdl_video_output.h"
 #include "packet_queue.h"
 #include "player.h"
-#include "utils/cmdutils.h"
-#include "utils/opt_common.h"
+#include "cmdutils.h"
+#include "opt_common.h"
 
 #if HAVE_VULKAN_RENDERER
 #include "vulkan_video_output.h"

@@ -14,7 +14,7 @@ extern "C" {
 #include <libavdevice/avdevice.h>
 }
 
-#include "utils/cmdutils.h"
+#include "cmdutils.h"
 
 constexpr int MAX_QUEUE_SIZE = 15 * 1024 * 1024;
 

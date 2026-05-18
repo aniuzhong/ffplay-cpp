@@ -8,10 +8,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 # ---- Find FFmpeg & SDL2 --------------------------------------------------
 if(WIN32)
-    include(DownloadPrebuiltDeps)
-
     set(THIRD_PARTY_DIR "${CMAKE_SOURCE_DIR}/third_party" CACHE PATH
         "Root directory for bundled third-party packages")
+    set(LIBPLACEBO_PREBUILT_ROOT "${THIRD_PARTY_DIR}/libplacebo-360-prebuilt"
+        CACHE PATH "Prebuilt libplacebo root (include/, lib/, bin/)")
+    include(DownloadPrebuiltDeps)
     set(FFMPEG_PREBUILT_ROOT "${THIRD_PARTY_DIR}/ffmpeg-8.1-full_build-shared" CACHE PATH
         "Gyan FFmpeg tree (include/, lib/, bin/)")
     set(FFMPEG_LIB_DIR "${FFMPEG_PREBUILT_ROOT}/lib" CACHE PATH
@@ -60,11 +61,6 @@ endif()
 
 # ---- Vulkan / libplacebo (optional) ----
 option(ENABLE_VULKAN "Enable Vulkan renderer via libplacebo" ON)
-
-if(WIN32)
-    set(LIBPLACEBO_PREBUILT_ROOT "${THIRD_PARTY_DIR}/libplacebo-360-prebuilt"
-        CACHE PATH "Prebuilt libplacebo root (include/, lib/, bin/)")
-endif()
 
 if(ENABLE_VULKAN)
     if(WIN32)
@@ -121,53 +117,53 @@ endif()
 
 # ---- ffplay executable ----
 add_executable(ffplay
-    ffplay.cpp
-    vulkan_video_output_impl.h
-    vulkan_video_output_impl.c
-    utils/cmdutils.c
-    utils/opt_common.c
-    utils/getenv_utf8.h
-    utils/wchar_filename.h
-    utils/va_copy.h
-    utils/w32dlfcn.h
-    sdl_audio_output.h
-    sdl_audio_output.cpp
-    audio_output.h
-    demuxer.h
-    demuxer.cpp
-    audio_visualizer.h
-    audio_visualizer.cpp
-    packet_queue.h
-    packet_queue.cpp
-    clock.h
-    clock.cpp
-    frame.h
-    frame_queue.h
-    frame_queue.cpp
-    decoder.h
-    decoder.cpp
-    video_types.h
-    video_output.h
-    video_output.cpp
-    sdl_video_output.h
-    sdl_video_output.cpp
-    null_video_output.h
-    null_video_output.cpp
-    null_audio_output.h
-    null_audio_output.cpp
-    player.h
-    player.cpp
-    video_pipeline.h
-    video_pipeline.cpp
-    audio_pipeline.h
-    audio_pipeline.cpp
-    subtitle_pipeline.h
-    subtitle_pipeline.cpp)
+    src/ffplay.cpp
+    src/video/vulkan_video_output_impl.h
+    src/video/vulkan_video_output_impl.c
+    src/compat/cmdutils.c
+    src/compat/opt_common.c
+    src/compat/getenv_utf8.h
+    src/compat/wchar_filename.h
+    src/compat/va_copy.h
+    src/compat/w32dlfcn.h
+    src/audio/sdl_audio_output.h
+    src/audio/sdl_audio_output.cpp
+    src/audio/audio_output.h
+    src/demuxer.h
+    src/demuxer.cpp
+    src/audio_visualizer.h
+    src/audio_visualizer.cpp
+    src/queue/packet_queue.h
+    src/queue/packet_queue.cpp
+    src/clock.h
+    src/clock.cpp
+    src/types/frame.h
+    src/queue/frame_queue.h
+    src/queue/frame_queue.cpp
+    src/decoder.h
+    src/decoder.cpp
+    src/types/video_types.h
+    src/video/video_output.h
+    src/video/video_output.cpp
+    src/video/sdl_video_output.h
+    src/video/sdl_video_output.cpp
+    src/video/null_video_output.h
+    src/video/null_video_output.cpp
+    src/audio/null_audio_output.h
+    src/audio/null_audio_output.cpp
+    src/player.h
+    src/player.cpp
+    src/video_pipeline.h
+    src/video_pipeline.cpp
+    src/audio_pipeline.h
+    src/audio_pipeline.cpp
+    src/subtitle_pipeline.h
+    src/subtitle_pipeline.cpp)
 
 if(HAVE_VULKAN_RENDERER)
     target_sources(ffplay PRIVATE
-        vulkan_video_output.h
-        vulkan_video_output.cpp)
+        src/video/vulkan_video_output.h
+        src/video/vulkan_video_output.cpp)
 endif()
 
 # ---- Compile definitions (replaces the old config.h mechanism) ------------
@@ -212,7 +208,12 @@ endif()
 if(WIN32)
     target_include_directories(ffplay PRIVATE
         "${CMAKE_SOURCE_DIR}"
-        "${CMAKE_SOURCE_DIR}/utils"
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/src/queue"
+        "${CMAKE_SOURCE_DIR}/src/compat"
+        "${CMAKE_SOURCE_DIR}/src/types"
+        "${CMAKE_SOURCE_DIR}/src/video"
+        "${CMAKE_SOURCE_DIR}/src/audio"
         "${CMAKE_SOURCE_DIR}/shim/include"
         "${FFMPEG_PREBUILT_ROOT}/include"
         $<$<BOOL:${HAVE_VULKAN_RENDERER}>:${LIBPLACEBO_INCLUDE_DIR}>)
@@ -231,7 +232,12 @@ if(WIN32)
 else()
     target_include_directories(ffplay PRIVATE
         "${CMAKE_SOURCE_DIR}"
-        "${CMAKE_SOURCE_DIR}/utils")
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/src/queue"
+        "${CMAKE_SOURCE_DIR}/src/compat"
+        "${CMAKE_SOURCE_DIR}/src/types"
+        "${CMAKE_SOURCE_DIR}/src/video"
+        "${CMAKE_SOURCE_DIR}/src/audio")
     target_link_libraries(ffplay PRIVATE
         PkgConfig::FFMPEG
         PkgConfig::SDL2
